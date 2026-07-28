@@ -1,0 +1,105 @@
+# Mu Miami — Docker Compose override for the upstream all-in-one stack.
+#
+# This file is LAYERED ON TOP OF deploy/all-in-one/docker-compose.yml.
+# It is never a replacement, and that upstream file is never edited (fork discipline:
+# all Mu Miami customization is additive so upstream rebases stay boring).
+#
+# Always invoke both files, in this order:
+#   docker compose --env-file .env \
+#     -f deploy/all-in-one/docker-compose.yml -f compose.mumiami.yml <cmd>
+# or just use the wrapper: scripts/mm up | down | logs | ps | reinit | ...
+#
+# PATH GOTCHA: Compose resolves every relative path in every -f file against the
+# directory of the FIRST -f file (deploy/all-in-one/), not against this file and not
+# against your cwd. That is why the .htpasswd source below is ../../mumiami/.htpasswd.
+#
+# MERGE GOTCHA: Compose CONCATENATES `ports` lists across files, so overriding a port
+# requires the `!override` tag — without it you would get both 80:80 and 8380:80.
+# `volumes` merge by container-side target path, so those replace cleanly.
+
+name: mu-miami
+
+services:
+  nginx-80:
+    container_name: mumiami-nginx
+    # Pinned by digest; recorded in docs/UPSTREAM.md.
+    image: nginx:alpine@sha256:4a73073bd557c65b759505da037898b61f1be6cbcc3c2c3aeac22d2a470c1752
+    restart: unless-stopped
+    # Upstream binds host port 80. This Mac runs other dev servers and a root-privileged
+    # port for a hobby admin panel is silly, so the admin panel moves to 8380.
+    ports: !override
+      - "${MM_ADMIN_PORT:-8380}:80"
+    volumes:
+      # Same target path as upstream -> replaces upstream's ./.htpasswd mount.
+      # Read-only here; the app container mounts the same file read-write (see below).
+      - ../../mumiami/.htpasswd:/etc/nginx/.htpasswd:ro
+
+  openmu-startup:
+    container_name: mumiami-openmu
+    # Pinned by digest; arm64 confirmed at execution time. See docs/UPSTREAM.md.
+    image: munique/openmu:0.9.10@sha256:681c52b304a44e70d26003e85193e167353d28eeee75cf1a49e8eae2add41ded
+    restart: unless-stopped
+    environment:
+      # DB_HOST / DB_ADMIN_USER / DB_ADMIN_PW are the supported override points
+      # (src/Persistence/EntityFramework/ConfigFileDatabaseConnectionStringProvider.cs).
+      # We do NOT edit ConnectionSettings.xml inside the image.
+      DB_HOST: database
+      DB_ADMIN_USER: ${POSTGRES_USER:?POSTGRES_USER missing - copy .env.example to .env}
+      DB_ADMIN_PW: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD missing - copy .env.example to .env}
+      # Which address the connect server ADVERTISES to clients when it hands them a game
+      # server. Not a bind address — bind is always 0.0.0.0 via the port maps above.
+      #
+      # The default resolver is Auto, which inside Docker means "ask an external service
+      # for our public IP". The connect server then tells every client to connect to the
+      # WAN address, which routes from neither this Mac nor the LAN. Set it explicitly.
+      #
+      # Accepted: an IP literal (recommended: this Mac's LAN IP), or loopback|local|public.
+      # Read by src/Network/IpAddressResolverFactory.cs. Because it comes from the
+      # environment, it also locks out runtime reconfiguration from the admin panel.
+      # Tradeoff and why a LAN IP over loopback: docs/runbook.md § 7.
+      RESOLVE_IP: ${MM_RESOLVE_IP:?MM_RESOLVE_IP missing - copy .env.example to .env}
+    # Upstream publishes a bare "8080", which Docker maps to a RANDOM host port — and
+    # that port reaches the admin panel directly, bypassing nginx basic auth entirely.
+    # Re-declared here without it: the admin panel is reachable only through nginx:8380.
+    # Game/connect/chat ports are stock.
+    ports: !override
+      - "55901:55901"
+      - "55902:55902"
+      - "55903:55903"
+      - "55904:55904"
+      - "55905:55905"
+      - "55906:55906"
+      - "44405:44405"   # connect server — original client
+      - "44406:44406"   # connect server — MuMain open-source client (002 uses this one)
+      - "55980:55980"   # chat server
+    volumes:
+      # Read-write on purpose: the admin panel rewrites this file when you change the
+      # admin password (src/Web/Shared/Services/NginxHtpasswdFileUserService.cs).
+      - ../../mumiami/.htpasswd:/etc/nginx/.htpasswd
+
+  database:
+    container_name: mumiami-postgres
+    # Upstream uses unpinned `postgres` (= latest). Pinned to the current latest major:
+    # postgres 18 keeps PGDATA under /var/lib/postgresql/<ver>/docker, which is what makes
+    # upstream's `/var/lib/postgresql` volume mount persist data. A silent major bump
+    # would move that path and look like total data loss.
+    image: postgres:18@sha256:3a82e1f56c8f0f5616a11103ac3d47e632c3938698946a7ad26da0df1334744a
+    restart: unless-stopped
+    # Upstream publishes 5432 on a random host port. Mu Miami keeps Postgres strictly
+    # internal to the compose network — nothing to collide with Supabase local, nothing
+    # to accidentally expose.
+    ports: !override []
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER missing - copy .env.example to .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD missing - copy .env.example to .env}
+      POSTGRES_DB: ${POSTGRES_DB:-openmu}
+    volumes:
+      # Same target as upstream's `dbdata` -> replaces it with our named volume.
+      # THIS VOLUME IS THE ENTIRE SERVER. See the `docker compose down -v` warning
+      # in CLAUDE.md and docs/runbook.md.
+      - mumiami-pgdata:/var/lib/postgresql
+
+volumes:
+  mumiami-pgdata:
+    # Explicit name so it is not prefixed with the project name.
+    name: mumiami-pgdata

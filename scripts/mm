@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+#
+# mm — Mu Miami stack wrapper.
+#
+# Wraps the two-file compose invocation so nobody has to remember it, and so the one
+# genuinely dangerous command (`docker compose down -v`, which destroys the
+# mumiami-pgdata volume = the entire server) has no casual path to it.
+#
+# Usage: scripts/mm <command> [args...]     — run `scripts/mm help` for the list.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BASE_COMPOSE="$REPO_ROOT/deploy/all-in-one/docker-compose.yml"
+MM_COMPOSE="$REPO_ROOT/compose.mumiami.yml"
+ENV_FILE="$REPO_ROOT/.env"
+HTPASSWD="$REPO_ROOT/mumiami/.htpasswd"
+VOLUME="mumiami-pgdata"
+
+die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+info() { printf '\033[36m==>\033[0m %s\n' "$*"; }
+
+preflight() {
+  [ -f "$BASE_COMPOSE" ] || die "upstream compose missing: $BASE_COMPOSE
+Upstream may have reorganized deploy/. Stop and report — do not hunt-and-adapt."
+  [ -f "$ENV_FILE" ] || die "no .env — run: cp .env.example .env && \$EDITOR .env"
+  [ -f "$HTPASSWD" ] || die "no mumiami/.htpasswd — run: scripts/mm htpasswd"
+  if [ "$(docker context show 2>/dev/null)" != "orbstack" ]; then
+    printf '\033[33mwarn:\033[0m docker context is "%s", expected "orbstack"\n' \
+      "$(docker context show 2>/dev/null || echo none)" >&2
+  fi
+  check_resolve_ip
+}
+
+# MM_RESOLVE_IP is the address the connect server advertises to clients. It is normally
+# this Mac's LAN IP, which is a DHCP lease and can move. If it drifts, clients reach the
+# connect server and then fail on every game server — a confusing failure worth catching
+# at `up` time rather than in-game.
+check_resolve_ip() {
+  local configured current
+  configured="$(grep -E '^MM_RESOLVE_IP=' "$ENV_FILE" | tail -1 | cut -d= -f2)"
+  case "$configured" in
+    ''|loopback|local|public) return 0 ;;
+  esac
+  current="$(ipconfig getifaddr en0 2>/dev/null || true)"
+  [ -n "$current" ] || return 0
+  if [ "$configured" != "$current" ]; then
+    printf '\033[33mwarn:\033[0m MM_RESOLVE_IP is %s but this Mac is now on %s.\n' \
+      "$configured" "$current" >&2
+    printf '      Clients will be told to connect to an address that no longer exists.\n' >&2
+    printf '      Fix: set MM_RESOLVE_IP=%s in .env, then scripts/mm restart\n' "$current" >&2
+  fi
+}
+
+dc() { docker compose --env-file "$ENV_FILE" -f "$BASE_COMPOSE" -f "$MM_COMPOSE" "$@"; }
+
+admin_url() {
+  local port
+  port="$(grep -E '^MM_ADMIN_PORT=' "$ENV_FILE" | tail -1 | cut -d= -f2)"
+  echo "http://localhost:${port:-8380}"
+}
+
+cmd="${1:-help}"
+[ $# -gt 0 ] && shift || true
+
+case "$cmd" in
+  up)
+    preflight
+    dc up -d "$@"
+    info "admin panel: $(admin_url)   (user from MM_ADMIN_USER in .env)"
+    info "first boot seeds the database — watch it with: scripts/mm logs"
+    ;;
+
+  down)
+    # Deliberately never forwards -v. Use `scripts/mm nuke` if you truly mean it.
+    preflight
+    for a in "$@"; do
+      case "$a" in
+        -v|--volumes) die "refusing: -v destroys $VOLUME (accounts, characters, the lot).
+If you really mean it, run: scripts/mm nuke" ;;
+      esac
+    done
+    dc down "$@"
+    info "stack down. Data preserved in volume $VOLUME."
+    ;;
+
+  restart) preflight; dc down; dc up -d ;;
+  ps)      preflight; dc ps "$@" ;;
+  logs)    preflight; dc logs -f --tail=200 "$@" ;;
+  config)  preflight; dc config "$@" ;;
+  exec)    preflight; dc exec "$@" ;;
+  psql)    preflight; dc exec database psql -U "$(grep -E '^POSTGRES_USER=' "$ENV_FILE" | cut -d= -f2)" -d openmu "$@" ;;
+
+  reinit)
+    # DESTRUCTIVE: drops and recreates the `openmu` database, then re-seeds stock
+    # Season 6 Episode 3 config. Accounts and characters do NOT survive.
+    preflight
+    printf '\033[33mreinit drops the entire `openmu` database\033[0m — config AND all\n'
+    printf 'accounts/characters — then re-seeds stock Season 6 Episode 3.\n'
+    read -r -p 'Type REINIT to continue: ' answer
+    [ "$answer" = "REINIT" ] || die "aborted"
+    info "stopping the live server so it does not race the reseed ..."
+    dc stop openmu-startup
+    docker rm -f mumiami-openmu-reinit >/dev/null 2>&1 || true
+    info "running startup with -reinit (no -autostart: it only needs to touch the DB) ..."
+    # `run` does not publish ports, so this never contends with the real server.
+    dc run -d --no-deps --name mumiami-openmu-reinit --entrypoint dotnet openmu-startup \
+      MUnique.OpenMU.Startup.dll -reinit >/dev/null
+    info "seeding stock Season 6 Episode 3 ..."
+    for _ in $(seq 1 120); do
+      if docker logs mumiami-openmu-reinit 2>&1 | grep -q "initialization finished"; then
+        break
+      fi
+      sleep 2
+    done
+    docker logs mumiami-openmu-reinit 2>&1 | grep -E "initialized|initialization finished" || true
+    docker rm -f mumiami-openmu-reinit >/dev/null 2>&1 || true
+    dc up -d
+    info "reseeded. Accounts and characters are GONE — restore a dump if you needed them."
+    ;;
+
+  backup)
+    preflight
+    out="${1:-$HOME/mu-miami-backup-$(date +%F).sql}"
+    info "dumping to $out"
+    dc exec -T database pg_dump -U "$(grep -E '^POSTGRES_USER=' "$ENV_FILE" | cut -d= -f2)" \
+      --clean --if-exists openmu > "$out"
+    [ -s "$out" ] || die "dump is empty — check that the stack is up"
+    info "done: $(du -h "$out" | cut -f1)"
+    ;;
+
+  restore)
+    preflight
+    src="${1:?usage: scripts/mm restore <dump.sql>}"
+    [ -s "$src" ] || die "no such dump: $src"
+    printf '\033[33mrestore overwrites the current database\033[0m from %s\n' "$src"
+    read -r -p 'Type RESTORE to continue: ' answer
+    [ "$answer" = "RESTORE" ] || die "aborted"
+    dc stop openmu-startup
+    dc exec -T database psql -U "$(grep -E '^POSTGRES_USER=' "$ENV_FILE" | cut -d= -f2)" \
+      -d openmu -v ON_ERROR_STOP=0 < "$src"
+    dc start openmu-startup
+    info "restored. Give the server a minute, then check $(admin_url)"
+    ;;
+
+  htpasswd)
+    mkdir -p "$REPO_ROOT/mumiami"
+    user="${1:-admin}"
+    htpasswd -B -c "$HTPASSWD" "$user"
+    printf '\n' >> "$HTPASSWD"   # nginx wants a trailing blank line
+    chmod 666 "$HTPASSWD"        # the app container rewrites this on password change
+    info "wrote $HTPASSWD for user '$user' (gitignored). Record the password in .env as MM_ADMIN_PASSWORD."
+    info "restart nginx to pick it up: scripts/mm restart"
+    ;;
+
+  nuke)
+    # The only path to `down -v`. Everything is gone: accounts, characters, config.
+    preflight
+    printf '\033[31mThis destroys the %s volume.\033[0m\n' "$VOLUME"
+    printf 'Every account, character, guild and config edit is gone. Back up first:\n'
+    printf '  scripts/mm backup\n'
+    read -r -p 'Type NUKE MU MIAMI to continue: ' answer
+    [ "$answer" = "NUKE MU MIAMI" ] || die "aborted"
+    dc down -v
+    docker volume rm "$VOLUME" 2>/dev/null || true
+    info "gone. `scripts/mm up` will boot a fresh, freshly-seeded stack."
+    ;;
+
+  help|-h|--help)
+    cat <<'USAGE'
+mm — Mu Miami stack wrapper
+
+  up [svc...]        start the stack (detached)
+  down               stop the stack, KEEP data  (refuses -v on purpose)
+  restart            down + up
+  ps                 service status
+  logs [svc]         follow logs
+  config             render the merged compose config
+  exec <svc> <cmd>   exec into a service
+  psql [args]        psql shell on the openmu database
+
+  reinit             DESTRUCTIVE: drop + re-seed the openmu database (stock S6E3)
+  backup [file]      pg_dump to file (default ~/mu-miami-backup-YYYY-MM-DD.sql)
+  restore <file>     restore a dump over the current database
+  htpasswd [user]    (re)generate mumiami/.htpasswd for the admin panel
+  nuke               DESTRUCTIVE: down -v, delete mumiami-pgdata entirely
+
+Everything runs:
+  docker compose --env-file .env \
+    -f deploy/all-in-one/docker-compose.yml -f compose.mumiami.yml ...
+USAGE
+    ;;
+
+  *) die "unknown command '$cmd' — run: scripts/mm help" ;;
+esac
