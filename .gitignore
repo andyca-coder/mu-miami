@@ -323,3 +323,12 @@ src/AdminPanel/wwwroot/content/js/app.js.map
 
 # AI
 .opencode/
+# --- Mu Miami (brief 001) ---------------------------------------------------
+# Local credentials — never commit.
+.env
+.env.local
+# Admin panel basic-auth hashes. Regenerate with `scripts/mm htpasswd`.
+mumiami/.htpasswd
+# Manual database dumps.
+*.sql.gz
+mu-miami-backup-*.sql
