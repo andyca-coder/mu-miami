@@ -85,6 +85,71 @@ If you really mean it, run: scripts/mm nuke" ;;
     ;;
 
   restart) preflight; dc down; dc up -d ;;
+
+  build)
+    # Builds a Mu Miami server image from src/. Needed because everything Mu Miami adds to
+    # the game logic (the MuMiami* configuration update plug-ins) is compiled INTO the
+    # server — upstream's published image does not contain it.
+    #
+    # No .NET SDK on the host: the whole build happens inside the SDK container that
+    # src/Startup/Dockerfile already uses.
+    sha="$(git -C "$REPO_ROOT" rev-parse --short=9 HEAD)"
+    if [ -n "$(git -C "$REPO_ROOT" status --porcelain -- src)" ]; then
+      sha="${sha}-dirty"
+      printf '\033[33mwarn:\033[0m src/ has uncommitted changes; tagging %s\n' "$sha" >&2
+    fi
+    tag="mumiami/openmu:${sha}"
+    info "building $tag from src/Startup/Dockerfile ..."
+    docker build -f "$REPO_ROOT/src/Startup/Dockerfile" -t "$tag" "$REPO_ROOT/src" "$@"
+    info "built $tag"
+    printf '\nSet this in .env, then restart:\n  MM_IMAGE=%s\n  scripts/mm restart\n\n' "$tag"
+    ;;
+
+  dotnet)
+    # Run the .NET SDK against src/ without installing anything on this Mac. NuGet packages
+    # are cached in the mumiami-nuget volume so repeat builds are fast.
+    #
+    #   scripts/mm dotnet build MUnique.OpenMU.sln -p:ci=true
+    #
+    # -p:ci=true matters: without it, pre-build targets try to run `npx` and a source
+    # generator that are not present in the SDK image, and the build fails for reasons that
+    # have nothing to do with your code. The Dockerfile passes the same flag.
+    docker volume create mumiami-nuget >/dev/null
+    # -it only when there really is a terminal, so this works from scripts and CI too.
+    # Written as a scalar rather than an array: macOS ships bash 3.2, where expanding an
+    # empty array under `set -u` is an "unbound variable" error.
+    tty_flags=""
+    if [ -t 0 ] && [ -t 1 ]; then tty_flags="-it"; fi
+    # shellcheck disable=SC2086
+    # The whole repo is mounted, not just src/: MUnique.OpenMU.sln references ../tests/**,
+    # so a src-only mount fails to load half the solution.
+    docker run --rm $tty_flags \
+      -v "$REPO_ROOT:/repo" \
+      -v mumiami-nuget:/root/.nuget/packages \
+      -w /repo/src \
+      mcr.microsoft.com/dotnet/sdk:10.0-alpine dotnet "$@"
+    ;;
+
+  verify-balance)
+    preflight
+    "$REPO_ROOT/scripts/verify-balance.sh" "$@"
+    ;;
+
+  balance-reoffer)
+    # After a reinit/reseed, the fresh-install path marks EVERY discovered update plug-in as
+    # already installed (DataInitializationBase.AddAllUpdateEntries), including Mu Miami's —
+    # even though the stock initializer never applied them. The panel then hides them and the
+    # server plays vanilla while claiming to be balanced.
+    #
+    # This deletes the Mu Miami update rows (version >= 9000) so /config-updates offers them
+    # again. It touches nothing else: no accounts, no characters, no game configuration.
+    preflight
+    info "clearing Mu Miami configuration-update rows (version >= 9000) ..."
+    dc exec -T database psql -U "$(grep -E '^POSTGRES_USER=' "$ENV_FILE" | cut -d= -f2)" -d openmu \
+      -v ON_ERROR_STOP=1 -c 'DELETE FROM config."ConfigurationUpdate" WHERE "Version" >= 9000;'
+    info "done. Open $(admin_url)/config-updates and apply the Mu Miami updates, then:"
+    info "  scripts/mm restart     # the ancient drop group needs one restart"
+    ;;
   ps)      preflight; dc ps "$@" ;;
   logs)    preflight; dc logs -f --tail=200 "$@" ;;
   config)  preflight; dc config "$@" ;;
@@ -178,6 +243,12 @@ mm — Mu Miami stack wrapper
   config             render the merged compose config
   exec <svc> <cmd>   exec into a service
   psql [args]        psql shell on the openmu database
+
+  build              build a Mu Miami server image from src/ (no host SDK needed)
+  dotnet <args>      run the .NET SDK against src/ in a container
+                     e.g. scripts/mm dotnet build MUnique.OpenMU.sln -p:ci=true
+  verify-balance     run the brief 002 acceptance queries against the live config
+  balance-reoffer    re-offer the Mu Miami config updates after a reseed
 
   reinit             DESTRUCTIVE: drop + re-seed the openmu database (stock S6E3)
   backup [file]      pg_dump to file (default ~/mu-miami-backup-YYYY-MM-DD.sql)

@@ -36,8 +36,20 @@ services:
 
   openmu-startup:
     container_name: mumiami-openmu
-    # Pinned by digest; arm64 confirmed at execution time. See docs/UPSTREAM.md.
-    image: munique/openmu:0.9.10@sha256:681c52b304a44e70d26003e85193e167353d28eeee75cf1a49e8eae2add41ded
+    # Two supported values, both recorded in docs/UPSTREAM.md:
+    #
+    #   unset  -> upstream's published all-in-one image, pinned by digest. arm64 confirmed.
+    #             This is stock OpenMU: it does NOT contain the MuMiami* update plug-ins,
+    #             so /config-updates will not offer them.
+    #
+    #   set     -> an image built from this repo's src/ by `scripts/mm build`, e.g.
+    #             MM_IMAGE=mumiami/openmu:739447193. Required from brief 002 onward,
+    #             because the balance changes ship as configuration update plug-ins that
+    #             have to be compiled into the server.
+    #
+    # A local build is pinned by the git SHA in its tag rather than by a registry digest;
+    # the pinned BASE images it is built from live in src/Startup/Dockerfile.
+    image: ${MM_IMAGE:-munique/openmu:0.9.10@sha256:681c52b304a44e70d26003e85193e167353d28eeee75cf1a49e8eae2add41ded}
     restart: unless-stopped
     environment:
       # DB_HOST / DB_ADMIN_USER / DB_ADMIN_PW are the supported override points
