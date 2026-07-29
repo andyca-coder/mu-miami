@@ -83,26 +83,45 @@ against a running server). Key mechanisms, confirmed:
 
 ## Acceptance Criteria
 
-- [ ] Simulator runs with one documented command; assumptions (kills/min per band, source
+- [x] Simulator runs with one documented command; assumptions (kills/min per band, source
       of monster XP values) stated inline
-- [ ] Simulated hours: 1–150 ∈ [3,5] · 151–300 ∈ [8,12] · 301–380 ∈ [11,15] ·
+      — `node scripts/simulate-progression.ts`. Monster levels are parsed from the
+      initializer sources at run time; the farming plan and kills/min are stated inline with
+      reasoning.
+- [x] Simulated hours: 1–150 ∈ [3,5] · 151–300 ∈ [8,12] · 301–380 ∈ [11,15] ·
       381–400 ∈ [7,10] · total ∈ [30,40]
-- [ ] Drop worksheet shows per-context summed chance ≤ 0.85, with the merged contexts
-      enumerated (global / map / monster)
-- [ ] Excellent chance 0.03; jewel groups 3.0×±0.1 their seeded vanilla values (vanilla
+      — **4.02 / 10.01 / 12.97 / 7.99, total 34.99.** All PASS.
+- [x] Drop worksheet shows per-context summed chance ≤ ~~0.85~~ **0.95**, with the merged
+      contexts enumerated (global / map / monster)
+      — **AMENDED, see Escalations.** Stock S6E3 is already at 0.8681 in its worst context,
+      so 0.85 was unreachable without cutting groups canon protects. Canon amended to 0.95
+      with the measurement recorded. Delivered worst context: **0.9080**.
+- [x] Excellent chance 0.03; jewel groups 3.0×±0.1 their seeded vanilla values (vanilla
       values quoted from source in the worksheet); Chaos Machine +13/+15 values byte-
       identical to upstream (grep-verified, path cited)
-- [ ] Ancient drop group exists ONLY in Kalima/Aida/Icarus map contexts — verified by
+      — excellent 0.03, jewels 0.003 = exactly 3.0× the seeded 0.001. Chaos Machine verified
+      three ways: live rows printed, `grep` over `Updates/MuMiami/` returns zero files, and
+      `git diff upstream/master -- VersionSeasonSix/ChaosMixes.cs` is empty.
+- [x] Ancient drop group exists ONLY in Kalima/Aida/Icarus map contexts — verified by
       querying the applied config, not by reading the plugin
-- [ ] Three clusters exist as spawn areas; counts + rects match the worksheet; visible in
+      — 9 map attachments (Kalima 1–7, Aida, Icarus), 0 monster attachments, and no
+      ancient-type group anywhere else. Queried, not read.
+- [x] Three clusters exist as spawn areas; counts + rects match the worksheet; visible in
       the admin panel map editor
-- [ ] All changes applied to the 001 stack via `/config-updates`; `miamitest` and all 21
+      — 7 spawn areas, 100 monsters, matching `docs/design/cluster-worksheet.md`. They are
+      the only rectangle spawns on those three maps.
+- [x] All changes applied to the 001 stack via `/config-updates`; `miamitest` and all 21
       accounts intact afterward (count verified before/after)
-- [ ] Update plugins are new `MuMiami*` files only; `git diff upstream/master --stat`
+      — applied through the panel. **22 accounts / 77 characters before and after**
+      (recounted at execution, as the brief instructed).
+- [x] Update plugins are new `MuMiami*` files only; `git diff upstream/master --stat`
       shows zero modified upstream files under `src/`
-- [ ] `docs/UPSTREAM.md` rebase procedure written; solution builds clean
+      — zero. Asserted by `scripts/mm verify-balance` check 5, not just by inspection.
+- [x] `docs/UPSTREAM.md` rebase procedure written; solution builds clean
       (`dotnet build` green — install the SDK in whatever way the runbook documents)
-- [ ] `docs/design/tuning-loop.md` exists with the restart-exception list
+      — full solution build **0 errors** (353 pre-existing upstream warnings). No SDK was
+      installed on the Mac: `scripts/mm dotnet` runs it in a container.
+- [x] `docs/design/tuning-loop.md` exists with the restart-exception list
 
 ## Edge Cases to Handle
 
@@ -151,9 +170,99 @@ dotnet build                                                 # green
 
 ## Handback
 
-- **Result:** {{...}}
-- **Escalations raised & how resolved:** {{...}}
-- **Deviations from plan and why:** {{...}}
-- **QA reviewer verdict:** {{...}}
-- **Adjacent issues noticed (not fixed):** {{...}}
-- **Suggested follow-up briefs:** {{...}}
+**Result:** Done and live. The server at `MM_IMAGE=mumiami/openmu:739447193-dirty` runs the
+Mu Miami curve, drop rates, ancient scoping and three farming clusters, on the brief 001
+database with all 22 accounts and 77 characters intact. `scripts/mm verify-balance` passes
+every check.
+
+Shipped:
+
+| | |
+|---|---|
+| `scripts/simulate-progression.ts` | the acceptance instrument; parses monster levels and the shipped curve from source, evaluates the mXparser expression itself |
+| `scripts/verify-balance.sh` (+ `mm verify-balance`) | 8 acceptance checks against the live config, including the standing worst-context drop measurement |
+| `scripts/mm build` / `mm dotnet` / `mm balance-reoffer` | containerised SDK + image build; reseed recovery |
+| `src/.../Updates/MuMiami/` (5 files) | `MuMiamiUpdateVersions`, ExperienceCurve, DropRates, AncientDrops, FarmingClusters |
+| `docs/design/` | `curve-worksheet.md`, `drop-worksheet.md`, `cluster-worksheet.md`, `tuning-loop.md`, amended `balance-canon.md` |
+| `docs/UPSTREAM.md` | rebase procedure + local image record |
+
+**Escalations raised & how resolved:**
+
+1. **The stack ran upstream's published image, so no `src/` code could ever execute.** The
+   brief assumed `/config-updates` would offer `MuMiami*` plug-ins; it cannot, because those
+   are compiled into the server. Raised before starting. Resolved by Andy: build a Mu Miami
+   image from source (`scripts/mm build`, `MM_IMAGE` in `.env`), keeping upstream's
+   digest-pinned image as the default for a clean clone. No host SDK — the build runs in
+   `mcr.microsoft.com/dotnet/sdk:10.0-alpine`.
+2. **Canon's ≤ 0.85 drop budget was below stock's own floor.** Measured stock worst context:
+   **0.8681**, Icarus / Dark Phoenix (level 108) — 0.5 money + 0.3 random-item + ~0.06 of
+   overlapping quest-item windows upstream attaches to every map. Hitting 0.85 would have
+   required cutting groups canon lists as "vanilla — texture preserved". Raised with three
+   options; Andy chose to amend canon to **≤ 0.95**, record the stock baseline and the query,
+   and make the worst-context measurement a standing rule for all future drop changes rather
+   than a one-off. Done: `balance-canon.md` amended, query shipped as check 3.
+
+**Deviations from plan and why:**
+
+- **`UpdateVersion.cs` was not edited.** The plan implied adding an enum member; that is an
+  upstream file. `MuMiamiUpdateVersions.cs` declares the 9000 block and casts at the single
+  point the interface requires the enum type. Legal C#, zero upstream diff.
+- **Cluster coordinates came from map data, not the panel's map editor.** The brief allowed
+  "reasonable first-pass coordinates from map data". Each rectangle was placed on stock spawn
+  anchors and validated against the map's real `TerrainData` pulled from the live database
+  (95 % / 89 % / 57 % walkable). Visual tuning is still Andy's, and `cluster-worksheet.md § 
+  Tuning them visually` says exactly how to freeze the result back.
+- **The density cap was reinterpreted.** "~2× the densest vanilla spawn area on that map"
+  reads as 2 × 1 on these maps — every stock area there is a point spawn of quantity 1. Used
+  spawns-per-20×20-window instead: observed maxima 18 / 8 / 9, clusters at 1.18× / 1.49× /
+  1.40×. Observed values recorded, as the brief asked.
+- **Two upstream updates rode along.** The source-built image carries updates 98 and 99,
+  both `IsMandatory = true`, which the panel applies whether or not you tick them. Effect on
+  balance: `AddRenaItem` adds a 0.01 drop group to every map (+0.0100 of the 0.9080). Mu
+  Miami's own contribution is +0.0319 exactly as designed. Flagged rather than fought — they
+  are upstream data fixes the fork wanted anyway.
+
+**QA reviewer verdict:** no separate reviewer; verification is mechanical and repeatable.
+`scripts/mm verify-balance` — all checks PASS. Both edge cases the brief called out were
+tested on a throwaway scratch stack, not reasoned about:
+
+- **Fresh DB vs. live DB produce identical config** — verified field by field (curve md5,
+  every chance, the 9 ancient attachments, an md5 over the cluster geometry). Identical.
+- **Applied twice** — idempotent: still 7 spawn areas / 100 monsters / 1 ancient group / 9
+  attachments, no duplicates.
+- **The reseed trap is real and was measured.** A fresh seed marks all four updates installed
+  and applies none of them: stock curve, 0.0001 excellent, no ancient group, no clusters — a
+  server that claims to be balanced and plays like vanilla. `scripts/mm balance-reoffer` is
+  the fix; documented in the runbook, `tuning-loop.md` and `CLAUDE.md`.
+
+**Adjacent issues noticed (not fixed):**
+
+- **The running image is tagged `-dirty`.** `src/` had uncommitted changes at build time.
+  Commit, `scripts/mm build`, update `MM_IMAGE`, restart — the tag then pins a real commit.
+  Until then the running server is not reproducible from any SHA.
+- **Two monsters exceed the drop budget in a context check 3 cannot see.** Crywolf's
+  Destructive Ogre Soldier and Archer carry a 0.8 monster-owned Wizard's Ring group on top of
+  their map's ~0.87. They are event spawns with no automatic spawn area, so they never enter
+  the measurement. Recorded in `drop-worksheet.md`. Harmless today; a trap for whoever makes
+  them ordinary spawns.
+- **`ExcellentItemDropLevelDelta` is still 25.** With excellent at 3 % this is now a much
+  more load-bearing number than it was at 0.01 % — it gates both eligibility and which item
+  pool an excellent is drawn from. Left alone deliberately (canon says nothing about it), but
+  it is the first knob to reach for if 3 % feels wrong in play.
+- **Two characters have items with no definition** (`TheCreator`, slot 38), logged as
+  warnings on every boot. Pre-existing, unrelated to balance.
+- **The panel's Updates page needs a scroll to reach the Apply button** on a 737 px viewport;
+  a click on the button while it is off-screen silently does nothing. Cosmetic, upstream.
+
+**Suggested follow-up briefs:**
+
+- **003 as planned** — hot zones (`ExpMultiplier = 1.5` on a rotating map, the mechanism is
+  free and untouched), elites, new monster definitions. Note it must re-run check 3 if it
+  adds any drop group.
+- **A 10-minute play validation.** Every number here is measured against config; none of it
+  has been felt. `node scripts/simulate-progression.ts --spot-check <level>` prints the
+  expected XP per kill for exactly this purpose. If kills/min is wrong, the curve multipliers
+  move and everything downstream re-derives cleanly.
+- **CI for the fork invariant.** `git diff --name-only upstream/master -- src/ | grep -v
+  MuMiami` and `scripts/mm dotnet build` are two commands that would catch a discipline
+  break at commit time instead of at rebase time.

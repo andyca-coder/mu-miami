@@ -105,6 +105,38 @@ scripts/mm psql        # psql shell on the openmu database
 scripts/mm help        # everything
 ```
 
+### Balance work (brief 002 onward)
+
+```bash
+scripts/mm build             # build the server image from src/  -> mumiami/openmu:<git-sha>
+scripts/mm dotnet <args>     # run the .NET SDK against the repo, in a container
+scripts/mm verify-balance    # run the balance acceptance checks against the live config
+scripts/mm balance-reoffer   # re-offer the Mu Miami config updates (after a reseed, or to re-apply)
+node scripts/simulate-progression.ts           # hours-to-400 for the shipped curve
+node scripts/simulate-progression.ts --from-db # ...for the curve the server is actually running
+```
+
+The full loop — panel edit → freeze into a plug-in → rebuild → apply — is
+[`docs/design/tuning-loop.md`](design/tuning-loop.md).
+
+**There is no .NET SDK on this Mac and there does not need to be.** Both `build` and `dotnet`
+run everything inside `mcr.microsoft.com/dotnet/sdk:10.0-alpine`, with NuGet packages cached
+in the `mumiami-nuget` volume. If you call `dotnet` in that container yourself, pass
+`-p:ci=true` — without it, pre-build targets reach for `npx` and a source generator that the
+SDK image does not have, and the build fails for reasons that have nothing to do with your
+code.
+
+### Which image is the server running?
+
+```bash
+docker inspect mumiami-openmu --format '{{.Config.Image}}'
+```
+
+`munique/openmu:0.9.10@sha256:…` means the stack is on upstream's published image — stock
+OpenMU, **without** the Mu Miami balance plug-ins. `mumiami/openmu:<sha>` means it is on a
+local build. Set `MM_IMAGE` in `.env` to switch. See
+[`UPSTREAM.md § Local image`](UPSTREAM.md).
+
 ## 4. Seeding, reinit, and exactly what it destroys
 
 ### How seeding happens
@@ -149,6 +181,28 @@ tuning loop runs on throwaway accounts. This is the load-bearing fact 002 needs.
 `dotnet MUnique.OpenMU.Startup.dll -reinit` (no `-autostart`; it only needs to touch the
 database, and `compose run` publishes no ports so it cannot contend with the real server),
 waits for `...initialization finished.`, removes it, and brings the stack back up.
+
+### After ANY reseed: the Mu Miami balance is silently gone
+
+A fresh seed marks every Mu Miami configuration update as **installed** while applying
+**none** of them — `DataInitializationBase.AddAllUpdateEntries` writes a `ConfigurationUpdate`
+row for every plug-in it discovers, on the assumption that a fresh install already contains
+the change in the initializer. Ours are not in upstream's initializer, and we do not edit
+upstream's initializer.
+
+Measured on a scratch database seeded from the Mu Miami image: rows 9001–9004 all present and
+installed, while `ExperienceFormula` was stock, excellent was 0.0001, and there was no ancient
+group and no cluster. **A server that claims to be balanced and plays like vanilla.**
+
+Recovery, after `scripts/mm reinit`, admin panel → Setup → Install, or a first boot on an
+empty volume:
+
+```bash
+scripts/mm balance-reoffer     # deletes ConfigurationUpdate rows with Version >= 9000
+# admin panel -> /config-updates -> apply the Mu Miami updates
+scripts/mm restart             # the ancient drop group needs one restart
+scripts/mm verify-balance      # confirm
+```
 
 ## 5. Backup and restore
 

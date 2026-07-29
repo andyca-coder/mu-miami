@@ -15,8 +15,17 @@ answerable six months from now.
 | Local clone | `~/code/mu-miami` — **never** `~/Documents` (iCloud eviction corrupts git operations; diagnosed on this machine) |
 
 `git log --oneline upstream/master..HEAD` should only ever show Mu Miami commits.
-`git log --oneline upstream/master..HEAD -- src/` should be **empty** through brief 001;
-brief 002 is the first one allowed to touch `src/`, and it establishes the rebase procedure.
+
+From brief 002 onward this fork **adds** files under `src/`. It still modifies none. The
+invariant that replaces "src/ is empty" is:
+
+```bash
+git diff --name-only upstream/master -- src/ | grep -v MuMiami    # must print nothing
+```
+
+Everything Mu Miami adds under `src/` lives in
+`src/Persistence/Initialization/Updates/MuMiami/` and is named `MuMiami*`. That is checked
+automatically by `scripts/mm verify-balance` (check 5).
 
 ## Pinned images
 
@@ -50,6 +59,134 @@ A silent bump to Postgres 19 would change that path and present as total data lo
 `postgres:18`'s digest is identical to `postgres:latest` as of 2026-07-28 — pinning
 costs nothing today and prevents that failure mode later. Runtime version verified:
 PostgreSQL 18.4 (Debian).
+
+## Local image (from brief 002)
+
+The stack no longer runs upstream's published image by default. Everything Mu Miami adds to
+the game — the `MuMiami*` configuration update plug-ins — is **compiled into the server**, so
+`/config-updates` cannot offer the balance changes unless the server was built from this
+repo's `src/`.
+
+```bash
+scripts/mm build                    # -> mumiami/openmu:<git-sha>   (appends -dirty if src/ is dirty)
+$EDITOR .env                        # MM_IMAGE=mumiami/openmu:<git-sha>
+scripts/mm restart
+```
+
+| | |
+|---|---|
+| Built from | `src/Startup/Dockerfile` (upstream's, unmodified), context `src/` |
+| Build host requirement | **none** — the SDK runs in a container. There is no .NET on this Mac. |
+| Runtime base | `mcr.microsoft.com/dotnet/aspnet:10.0-alpine` |
+| Build base | `mcr.microsoft.com/dotnet/sdk:10.0-alpine` |
+| Pin | the git SHA in the tag. A `-dirty` suffix means the image is not reproducible from any commit. |
+| Size | ~397 MB |
+| First build | ~5 minutes on M-series; incremental rebuilds reuse the restore layer |
+
+`MM_IMAGE` unset still boots upstream's digest-pinned image — useful for A/B-ing against
+stock, and it keeps a clean clone working before the first build. That image is stock OpenMU:
+the balance updates will not appear.
+
+`scripts/mm dotnet <args>` runs the same SDK container against the repo for compiling without
+building an image, e.g. `scripts/mm dotnet build MUnique.OpenMU.sln -p:ci=true`. **`-p:ci=true`
+is not optional** — without it, pre-build targets invoke `npx` and a source generator that are
+not present in the SDK image, and the build fails for reasons unrelated to your code. The
+Dockerfile passes the same flag.
+
+Verified on 2026-07-28: full solution build **0 errors** (353 pre-existing upstream warnings),
+image builds and runs on arm64, server boots and serves the live database.
+
+## Rebase procedure
+
+Operator checklist. The whole design of this fork is to make this boring: the only files that
+can conflict are ones upstream does not have.
+
+```bash
+cd ~/code/mu-miami
+scripts/mm backup                              # 1. always. ~15 MB, one file.
+git fetch upstream
+git log --oneline HEAD..upstream/master | head # 2. what am I taking?
+```
+
+**3. Rebase.**
+
+```bash
+git rebase upstream/master
+```
+
+Expected conflict surface — and nothing else:
+
+| Path | Why it can conflict |
+|---|---|
+| `src/Persistence/Initialization/Updates/MuMiami/**` | ours; only if upstream adds a file at the same path, which it will not |
+| `compose.mumiami.yml`, `scripts/**`, `mumiami/**` | ours; upstream has no such files |
+| `CLAUDE.md`, `docs/**` (excluding upstream's own docs) | ours |
+| `deploy/all-in-one/docker-compose.yml` | **not ours** — if this changed upstream, stop and read `docs/runbook.md § Compose drift` before continuing |
+
+If a conflict appears in any *other* file under `src/`, something has gone wrong with the
+fork discipline. Do not resolve it — find out how an upstream file came to be modified.
+
+**4. Check the invariant.**
+
+```bash
+git diff --name-only upstream/master -- src/ | grep -v MuMiami    # must print nothing
+```
+
+**5. Check the update-version block** hasn't collided. Upstream tracks its own numbers in
+`UpdateVersion.cs`; Mu Miami uses 9000+ in `MuMiamiUpdateVersions.cs` precisely so it never
+has to touch that enum. If upstream's counter ever approaches 9000, move the Mu Miami block
+up — never renumber an update that has already been applied to a database.
+
+```bash
+tail -5 src/Persistence/Initialization/Updates/UpdateVersion.cs   # upstream's highest
+```
+
+**6. Build.**
+
+```bash
+scripts/mm dotnet build MUnique.OpenMU.sln -c Release -p:ci=true   # must be 0 errors
+```
+
+**7. Dry-run the config updates on a scratch database** — never on the real one. A throwaway
+pair on its own network, no volume, no published ports:
+
+```bash
+scripts/mm build
+docker network create mumiami-scratch
+docker run -d --name mumiami-scratch-db --network mumiami-scratch \
+  -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=scratchonly -e POSTGRES_DB=openmu postgres:18
+docker exec mumiami-scratch-db pg_isready -U postgres          # wait for this before the app
+docker run -d --name mumiami-scratch-app --network mumiami-scratch \
+  -e DB_HOST=mumiami-scratch-db -e DB_ADMIN_USER=postgres -e DB_ADMIN_PW=scratchonly \
+  -e RESOLVE_IP=loopback mumiami/openmu:<tag>
+
+# the app races initdb if you start it too early; it has no restart policy here.
+# `docker start mumiami-scratch-app` again if it exits.
+
+docker exec mumiami-scratch-db psql -U postgres -d openmu \
+  -c 'DELETE FROM config."ConfigurationUpdate" WHERE "Version" >= 9000;'
+# browse http://<scratch-app-container-ip>:8080/config-updates and apply
+```
+
+Then compare the scratch configuration against the live one (the query set is in
+`docs/design/tuning-loop.md § 6`). They must match.
+
+```bash
+docker rm -f mumiami-scratch-app mumiami-scratch-db && docker network rm mumiami-scratch
+```
+
+**8. Deploy and smoke test.**
+
+```bash
+$EDITOR .env                       # MM_IMAGE=mumiami/openmu:<new tag>
+scripts/mm restart
+scripts/mm verify-balance          # all checks PASS
+node scripts/simulate-progression.ts --from-db   # curve still in tolerance
+```
+
+Then log in and walk to Calle Ocho.
+
+**9. Record it here** — fork-base SHA, date, and any new pinned digests.
 
 ## Upstream files we depend on but never edit
 

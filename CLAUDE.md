@@ -6,8 +6,12 @@ OrbStack. Personal/friends scale. Not public, not commercial.
 
 - **Runbook** (clean clone → running, backup/restore, reinit, troubleshooting):
   [`docs/runbook.md`](docs/runbook.md)
-- **Upstream record** (fork base SHA, pinned image digests, override points):
+- **Upstream record** (fork base SHA, pinned digests, local image, **rebase procedure**):
   [`docs/UPSTREAM.md`](docs/UPSTREAM.md)
+- **Balance canon** (the *why* — curve, drop budget, farming geography):
+  [`docs/design/balance-canon.md`](docs/design/balance-canon.md)
+- **Tuning loop** (how a balance idea becomes a number that survives a reseed):
+  [`docs/design/tuning-loop.md`](docs/design/tuning-loop.md)
 - **Briefs** (the unit of work in this repo): [`docs/briefs/`](docs/briefs/)
 
 ## ⚠️ The most dangerous command in this repo
@@ -35,9 +39,18 @@ scripts/mm backup      # pg_dump      scripts/mm restore <file>
 scripts/mm reinit      # DESTRUCTIVE: drop + re-seed stock S6E3
 scripts/mm nuke        # DESTRUCTIVE: delete the data volume
 scripts/mm htpasswd    # (re)generate admin panel credentials
+
+scripts/mm build       # build the server image from src/  (no host .NET needed)
+scripts/mm dotnet ...  # run the .NET SDK against the repo, in a container
+scripts/mm verify-balance    # balance acceptance checks against the live config
+scripts/mm balance-reoffer   # re-offer the Mu Miami config updates after a reseed
 ```
 
-Everything above wraps exactly one invocation:
+The stack runs a **locally built image** from brief 002 onward (`MM_IMAGE` in `.env`), because
+the balance changes are configuration update plug-ins compiled into the server. Unset
+`MM_IMAGE` and you are back on upstream's stock image, playing vanilla.
+
+The `mm` commands other than `build` / `dotnet` wrap exactly one invocation:
 
 ```bash
 docker compose --env-file .env \
@@ -72,9 +85,11 @@ This is a **fork we intend to keep rebasing**, so upstream rebases must stay bor
    have: `compose.mumiami.yml`, `scripts/`, `mumiami/`, `CLAUDE.md`, `docs/` (excluding
    upstream's own docs). We do not edit `deploy/all-in-one/docker-compose.yml` — we layer
    an override on top of it.
-2. **`src/` is upstream's.** Brief 001 touched zero files under `src/`. Brief 002 is the
-   first one allowed to, and it must do so in isolated, clearly marked files and establish
-   the rebase procedure before it starts.
+2. **`src/` is upstream's — we only add to it.** Brief 002 added
+   `src/Persistence/Initialization/Updates/MuMiami/`, and modified nothing. Not one upstream
+   file under `src/` differs from upstream/master, including `UpdateVersion.cs`: Mu Miami's
+   update versions live in `MuMiamiUpdateVersions.cs` in the 9000 block and are cast to the
+   enum at the one point the interface demands that type.
 3. **Configure through documented override points, never by editing the image.**
    `DB_HOST` / `DB_ADMIN_USER` / `DB_ADMIN_PW`, the `-reinit` / `-resolveIP:` / `-version:`
    startup arguments. See `docs/UPSTREAM.md`.
@@ -86,8 +101,11 @@ This is a **fork we intend to keep rebasing**, so upstream rebases must stay bor
 Check yourself before opening a PR:
 
 ```bash
-git log --oneline upstream/master..HEAD -- src/    # empty through brief 001
+git diff --name-only upstream/master -- src/ | grep -v MuMiami    # must print nothing
 ```
+
+`scripts/mm verify-balance` asserts this too (check 5). Rebase procedure:
+[`docs/UPSTREAM.md § Rebase procedure`](docs/UPSTREAM.md).
 
 ## Secrets
 
@@ -149,8 +167,35 @@ Real findings from brief 001. Each one cost time to discover.
   reaches the admin panel without the nginx basic-auth prompt — handy for scripted or
   automated access. Do not publish that port; see above.
 
+## Balance (brief 002, done)
+
+Balance is **no longer stock**. The contract is
+[`docs/design/balance-canon.md`](docs/design/balance-canon.md); the how is
+`src/Persistence/Initialization/Updates/MuMiami/`.
+
+- **~35 hours to level 400** via a four-phase piecewise `ExperienceFormula`. Every rate
+  multiplier (`ExperienceRate`, per-server, per-map `ExpMultiplier`, character attributes) is
+  still 1.0 — the curve is the mechanism. Do not "help" by adding a rate multiplier; you will
+  double-count and you will break brief 003's hot zone.
+- **Excellent 3 %, jewels 3× stock, ancients only in Kalima / Aida / Icarus.**
+- **Chaos Machine +13/+15 odds are untouched and stay untouched.** That is the whole scarcity
+  design. `scripts/mm verify-balance` fails if any `MuMiami*` file so much as mentions
+  `ItemCrafting`.
+- **Drop budget ≤ 0.95** summed chance in any monster context (amended from 0.85 — stock
+  itself is at 0.8681). **Every change that adds or raises a drop group must re-run
+  `scripts/mm verify-balance`.**
+- Three farming clusters: Dungeon, Tarkan, Kanturu Ruins.
+
+Two traps worth knowing before you touch any of it:
+
+- **A reseed silently reverts the balance while claiming it is installed.** Run
+  `scripts/mm balance-reoffer` after any reseed. See `docs/design/tuning-loop.md § 6`.
+- **Panel edits are not real until frozen into a `MuMiami*UpdatePlugIn` and rebuilt.**
+
+Still stock, and still tempting: PvP and class balance, skill tuning, monster stats.
+
 ## Scope discipline
 
-Balance and rates are **stock Season 6 Episode 3** as of brief 001. Changing them is brief
-002's job, and it is the single most tempting scope creep in this project. If you are
-reading this while doing something else, do not touch experience rates.
+Hot zones, elites and new monster definitions are **brief 003**. Miami theming beyond the
+names canon already fixes is **005**. If you are reading this while doing something else,
+that is exactly when the temptation lands.
